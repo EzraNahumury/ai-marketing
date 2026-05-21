@@ -55,6 +55,7 @@ export const TikTokMarketplaceService = {
     | {
         ok: true;
         shopId: string;
+        shopName: string | null;
         accessTokenEncrypted: string;
         refreshTokenEncrypted: string;
         expiresAt: string | null;
@@ -70,29 +71,59 @@ export const TikTokMarketplaceService = {
       };
     }
 
-    // TODO: implement the real call.
-    //   const url = new URL("https://auth.tiktok-shops.com/api/v2/token/get");
-    //   url.searchParams.set("app_key", creds.appKey);
-    //   url.searchParams.set("app_secret", creds.appSecret);
-    //   url.searchParams.set("auth_code", code);
-    //   url.searchParams.set("grant_type", "authorized_code");
-    //   const res = await fetch(url);
-    //   const json = await res.json();
-    //   if (json.code !== 0) return { ok: false, reason: "request_failed", message: json.message };
-    //   return {
-    //     ok: true,
-    //     shopId: json.data.open_id ?? json.data.seller_name,
-    //     accessTokenEncrypted: encryptToken(json.data.access_token),
-    //     refreshTokenEncrypted: encryptToken(json.data.refresh_token),
-    //     expiresAt: new Date(json.data.access_token_expire_in * 1000).toISOString(),
-    //   };
-    void code;
-    void encryptToken;
-    return {
-      ok: false,
-      reason: "request_failed",
-      message: "TikTok token exchange not implemented yet (TODO)",
-    };
+    try {
+      const url = new URL("https://auth.tiktok-shops.com/api/v2/token/get");
+      url.searchParams.set("app_key", creds.appKey);
+      url.searchParams.set("app_secret", creds.appSecret);
+      url.searchParams.set("auth_code", code);
+      url.searchParams.set("grant_type", "authorized_code");
+
+      const res = await fetch(url.toString());
+      if (!res.ok) {
+        return {
+          ok: false,
+          reason: "request_failed",
+          message: `HTTP ${res.status} from TikTok token endpoint`,
+        };
+      }
+
+      const json = (await res.json()) as {
+        code: number;
+        message: string;
+        data?: {
+          access_token: string;
+          access_token_expire_in: number;
+          refresh_token: string;
+          open_id: string;
+          seller_name?: string;
+        };
+      };
+
+      if (json.code !== 0 || !json.data) {
+        return {
+          ok: false,
+          reason: "request_failed",
+          message: json.message ?? "Unknown error from TikTok",
+        };
+      }
+
+      return {
+        ok: true,
+        shopId: json.data.open_id,
+        shopName: json.data.seller_name ?? null,
+        accessTokenEncrypted: encryptToken(json.data.access_token),
+        refreshTokenEncrypted: encryptToken(json.data.refresh_token),
+        expiresAt: json.data.access_token_expire_in
+          ? new Date(json.data.access_token_expire_in * 1000).toISOString()
+          : null,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "request_failed",
+        message: err instanceof Error ? err.message : "Unexpected error during token exchange",
+      };
+    }
   },
 
   /**
@@ -143,6 +174,7 @@ export const TikTokMarketplaceService = {
       await upsertMarketplaceAccount({
         marketplace: MARKETPLACE,
         shop_id: exchange.shopId,
+        shop_name: exchange.shopName ?? undefined,
         account_status: "connected",
         access_token_encrypted: exchange.accessTokenEncrypted,
         refresh_token_encrypted: exchange.refreshTokenEncrypted,
