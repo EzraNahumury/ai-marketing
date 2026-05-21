@@ -14,7 +14,6 @@ export interface CardData {
   title: string;
   callbackUrl: string;
   webhookUrl: string;
-  authUrl: string | null;
   connections: ConnectionInfo[];
   sampleCallbackQuery: string;
 }
@@ -35,10 +34,28 @@ export function IntegrationsClient({ cards }: Props) {
 
 function Card({ card }: { card: CardData }) {
   const [toast, setToast] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
 
   const flash = (message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(null), 2500);
+  };
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    try {
+      const res = await fetch(`/api/${card.marketplace}/auth-url`);
+      const json = await res.json() as { url?: string; error?: string };
+      if (!json.url) {
+        flash(json.error ?? "Failed to get auth URL");
+        return;
+      }
+      window.location.href = json.url;
+    } catch {
+      flash("Network error — could not get auth URL");
+    } finally {
+      setConnecting(false);
+    }
   };
 
   const copy = async (value: string, label: string) => {
@@ -94,16 +111,14 @@ function Card({ card }: { card: CardData }) {
       <UrlRow label="Webhook URL" value={card.webhookUrl} onCopy={() => copy(card.webhookUrl, "Webhook URL")} />
 
       <div className="mt-4 flex flex-wrap gap-2">
-        {card.authUrl && (
-          <a
-            href={card.authUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
-          >
-            Connect
-          </a>
-        )}
+        <button
+          type="button"
+          onClick={handleConnect}
+          disabled={connecting}
+          className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+        >
+          {connecting ? "Connecting…" : "Connect"}
+        </button>
         <button
           type="button"
           onClick={testCallback}

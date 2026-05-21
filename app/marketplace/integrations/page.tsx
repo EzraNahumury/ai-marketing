@@ -5,6 +5,8 @@ import { TikTokMarketplaceService } from "@/lib/marketplace/tiktok";
 import { listMarketplaceAccounts } from "@/lib/db";
 import { IntegrationsClient, type CardData } from "./IntegrationsClient";
 
+// Auth URLs are generated fresh per-click via /api/{marketplace}/auth-url to avoid stale timestamps.
+
 export const dynamic = "force-dynamic";
 
 type SearchParams = Promise<{
@@ -27,15 +29,12 @@ export default async function MarketplaceIntegrationsPage({
       listMarketplaceAccounts("shopee"),
       listMarketplaceAccounts("tiktok"),
     ]);
-    const shopeeAuthUrl = (() => { try { return ShopeeMarketplaceService.generateAuthUrl(); } catch { return null; } })();
-    const tiktokAuthUrl = (() => { try { return TikTokMarketplaceService.generateAuthUrl(); } catch { return null; } })();
     cards = [
       {
         marketplace: "shopee",
         title: "Shopee",
         callbackUrl: ShopeeMarketplaceService.getCallbackUrl(),
         webhookUrl: ShopeeMarketplaceService.getWebhookUrl(),
-        authUrl: shopeeAuthUrl,
         connections: shopeeAccounts.map((a) => ({
           shopId: a.shop_id,
           shopName: a.shop_name,
@@ -49,7 +48,6 @@ export default async function MarketplaceIntegrationsPage({
         title: "TikTok / Tokopedia Shop",
         callbackUrl: TikTokMarketplaceService.getCallbackUrl(),
         webhookUrl: TikTokMarketplaceService.getWebhookUrl(),
-        authUrl: tiktokAuthUrl,
         connections: tiktokAccounts.map((a) => ({
           shopId: a.shop_id,
           shopName: a.shop_name,
