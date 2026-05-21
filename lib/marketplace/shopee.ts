@@ -1,6 +1,7 @@
-// Shopee Open Platform integration skeleton.
-// Reference: https://open.shopee.com/documents
+// Shopee Open Platform integration.
+// Reference: https://open.shopee.com/documents/v2/OpenAPIGuide
 
+import { createHmac } from "node:crypto";
 import {
   buildUrl,
   getShopeeCallbackPath,
@@ -15,6 +16,15 @@ import {
   upsertMarketplaceAccount,
 } from "../db";
 import type { CallbackOutcome, WebhookOutcome } from "./types";
+
+// Use test endpoint for Developing apps; switch to partner.shopeemobile.com after Go-Live.
+const SHOPEE_HOST =
+  process.env.SHOPEE_HOST ?? "https://partner.test-stable.shopeemobile.com";
+
+function shopeeSign(partnerId: string, path: string, timestamp: number, partnerKey: string): string {
+  const base = `${partnerId}${path}${timestamp}`;
+  return createHmac("sha256", partnerKey).update(base).digest("hex");
+}
 
 const MARKETPLACE = "shopee" as const;
 
@@ -38,10 +48,16 @@ export const ShopeeMarketplaceService = {
     if (!creds) {
       throw new Error("Shopee credentials are not configured");
     }
-    // TODO: compute HMAC-SHA256(partner_id + api_path + timestamp, partner_key)
-    // per Shopee's signing rules and append `sign` + `timestamp` query params.
-    const redirect = encodeURIComponent(this.getCallbackUrl());
-    return `https://partner.shopeemobile.com/api/v2/shop/auth_partner?partner_id=${creds.partnerId}&redirect=${redirect}`;
+    const path = "/api/v2/shop/auth_partner";
+    const timestamp = Math.floor(Date.now() / 1000);
+    const sign = shopeeSign(creds.partnerId, path, timestamp, creds.partnerKey);
+    const params = new URLSearchParams({
+      partner_id: creds.partnerId,
+      timestamp: String(timestamp),
+      sign,
+      redirect: this.getCallbackUrl(),
+    });
+    return `${SHOPEE_HOST}${path}?${params.toString()}`;
   },
 
   /**
@@ -71,32 +87,61 @@ export const ShopeeMarketplaceService = {
       };
     }
 
-    // TODO: implement the real signed POST request.
-    //   const timestamp = Math.floor(Date.now() / 1000);
-    //   const path = "/api/v2/auth/token/get";
-    //   const baseString = `${creds.partnerId}${path}${timestamp}`;
-    //   const sign = hmacSha256(baseString, creds.partnerKey);
-    //   const res = await fetch(`https://partner.shopeemobile.com${path}?partner_id=${creds.partnerId}&timestamp=${timestamp}&sign=${sign}`, {
-    //     method: "POST",
-    //     headers: { "Content-Type": "application/json" },
-    //     body: JSON.stringify({ code, shop_id: Number(shopId), partner_id: Number(creds.partnerId) }),
-    //   });
-    //   const json = await res.json();
-    //   if (json.error) return { ok: false, reason: "request_failed", message: json.message ?? json.error };
-    //   return {
-    //     ok: true,
-    //     accessTokenEncrypted: encryptToken(json.access_token),
-    //     refreshTokenEncrypted: encryptToken(json.refresh_token),
-    //     expiresAt: new Date(Date.now() + json.expire_in * 1000).toISOString(),
-    //   };
-    void code;
-    void shopId;
-    void encryptToken; // silence unused-import until wired up
-    return {
-      ok: false,
-      reason: "request_failed",
-      message: "Shopee token exchange not implemented yet (TODO)",
-    };
+    try {
+      const path = "/api/v2/auth/token/get";
+      const timestamp = Math.floor(Date.now() / 1000);
+      const sign = shopeeSign(creds.partnerId, path, timestamp, creds.partnerKey);
+      const url = `${SHOPEE_HOST}${path}?partner_id=${creds.partnerId}&timestamp=${timestamp}&sign=${sign}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code,
+          shop_id: Number(shopId),
+          partner_id: Number(creds.partnerId),
+        }),
+      });
+
+      if (!res.ok) {
+        return {
+          ok: false,
+          reason: "request_failed",
+          message: `HTTP ${res.status} from Shopee token endpoint`,
+        };
+      }
+
+      const json = (await res.json()) as {
+        access_token?: string;
+        refresh_token?: string;
+        expire_in?: number;
+        error?: string;
+        message?: string;
+      };
+
+      if (json.error || !json.access_token) {
+        return {
+          ok: false,
+          reason: "request_failed",
+          message: json.message ?? json.error ?? "Unknown error from Shopee",
+        };
+      }
+
+      return {
+        ok: true,
+        accessTokenEncrypted: encryptToken(json.access_token),
+        refreshTokenEncrypted: encryptToken(json.refresh_token ?? ""),
+        expiresAt: json.expire_in
+          ? new Date(Date.now() + json.expire_in * 1000).toISOString()
+          : null,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "request_failed",
+        message: err instanceof Error ? err.message : "Unexpected error during token exchange",
+      };
+    }
   },
 
   /**
