@@ -1,18 +1,20 @@
-// TikTok Shop / Tokopedia Shop Partner Center integration skeleton.
+// TikTok Shop / Tokopedia Shop Partner Center integration.
 // Reference: https://partner.tiktokshop.com/docv2/
 
+import { createHmac } from "node:crypto";
 import {
   buildUrl,
   getTikTokCallbackPath,
   getTikTokCredentials,
   getTikTokWebhookPath,
 } from "../env";
-import { encryptToken } from "../crypto";
+import { encryptToken, decryptToken } from "../crypto";
 import { logger } from "../logger";
 import {
   recordIntegrationLog,
   recordWebhookEvent,
   upsertMarketplaceAccount,
+  getMarketplaceAccount,
 } from "../db";
 import type { CallbackOutcome, WebhookOutcome } from "./types";
 
@@ -205,13 +207,98 @@ export const TikTokMarketplaceService = {
   /**
    * Persist a TikTok webhook push for downstream processing.
    */
+  async refreshToken(shopId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const creds = getTikTokCredentials();
+    if (!creds) return { ok: false, message: "TikTok credentials are not configured" };
+
+    const account = await getMarketplaceAccount(MARKETPLACE, shopId);
+    if (!account?.refresh_token_encrypted) {
+      return { ok: false, message: "No refresh token found for shop" };
+    }
+
+    let refreshTokenPlain: string;
+    try {
+      refreshTokenPlain = decryptToken(account.refresh_token_encrypted);
+    } catch {
+      return { ok: false, message: "Failed to decrypt refresh token" };
+    }
+
+    try {
+      const url = new URL("https://auth.tiktok-shops.com/api/v2/token/refresh");
+      url.searchParams.set("app_key", creds.appKey);
+      url.searchParams.set("app_secret", creds.appSecret);
+      url.searchParams.set("refresh_token", refreshTokenPlain);
+      url.searchParams.set("grant_type", "refresh_token");
+
+      const res = await fetch(url.toString());
+      if (!res.ok) {
+        return { ok: false, message: `HTTP ${res.status} from TikTok refresh endpoint` };
+      }
+
+      const json = (await res.json()) as {
+        code: number;
+        message: string;
+        data?: {
+          access_token: string;
+          access_token_expire_in: number;
+          refresh_token: string;
+          open_id: string;
+        };
+      };
+
+      if (json.code !== 0 || !json.data) {
+        return { ok: false, message: json.message ?? "Unknown error from TikTok refresh" };
+      }
+
+      await upsertMarketplaceAccount({
+        marketplace: MARKETPLACE,
+        shop_id: shopId,
+        account_status: "connected",
+        access_token_encrypted: encryptToken(json.data.access_token),
+        refresh_token_encrypted: encryptToken(json.data.refresh_token),
+        token_expired_at: json.data.access_token_expire_in
+          ? new Date(json.data.access_token_expire_in * 1000).toISOString()
+          : null,
+      });
+
+      await recordIntegrationLog({
+        marketplace: MARKETPLACE,
+        action: "token_refresh",
+        status: "success",
+        message: "Token refreshed",
+        metadata: { shopId },
+      });
+
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : "Unexpected error during token refresh",
+      };
+    }
+  },
+
   async handleWebhook(
     payload: unknown,
     headers: Record<string, string>,
+    rawBody: string,
   ): Promise<WebhookOutcome> {
-    // TODO: validate signature header (e.g. `x-tts-signature`) per:
-    //   https://partner.tiktokshop.com/docv2/page/webhook-event-list
-    // The signature is HMAC-SHA256(`${app_key}${timestamp}${body}`, app_secret).
+    const creds = getTikTokCredentials();
+    let signatureValid: boolean | null = null;
+    if (creds) {
+      const signature = headers["x-tts-signature"];
+      const timestamp = headers["x-tts-timestamp"] ?? "";
+      if (signature) {
+        const expected = createHmac("sha256", creds.appSecret)
+          .update(`${creds.appKey}${timestamp}${rawBody}`)
+          .digest("hex");
+        signatureValid = signature === expected;
+        if (!signatureValid) {
+          logger.warn("TikTok webhook signature mismatch");
+        }
+      }
+    }
+
     const eventType =
       isObject(payload) && typeof payload.type === "string" ? `tiktok.${payload.type}` : null;
     const shopId =
@@ -229,7 +316,7 @@ export const TikTokMarketplaceService = {
       shop_id: shopId,
       marketplace_order_id: orderId,
       payload,
-      signature_valid: null,
+      signature_valid: signatureValid,
       headers,
     });
     return { ok: true, duplicate: result.duplicate, eventId: result.row.id };

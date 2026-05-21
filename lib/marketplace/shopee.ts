@@ -14,7 +14,9 @@ import {
   recordIntegrationLog,
   recordWebhookEvent,
   upsertMarketplaceAccount,
+  getMarketplaceAccount,
 } from "../db";
+import { decryptToken } from "../crypto";
 import type { CallbackOutcome, WebhookOutcome } from "./types";
 
 // Use test endpoint for Developing apps; switch to partner.shopeemobile.com after Go-Live.
@@ -241,16 +243,103 @@ export const ShopeeMarketplaceService = {
    * Handle an incoming webhook push. Persists the raw payload and returns
    * fast; downstream processing happens off the request path.
    */
+  async refreshToken(shopId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const creds = getShopeeCredentials();
+    if (!creds) return { ok: false, message: "Shopee credentials are not configured" };
+
+    const account = await getMarketplaceAccount(MARKETPLACE, shopId);
+    if (!account?.refresh_token_encrypted) {
+      return { ok: false, message: "No refresh token found for shop" };
+    }
+
+    let refreshTokenPlain: string;
+    try {
+      refreshTokenPlain = decryptToken(account.refresh_token_encrypted);
+    } catch {
+      return { ok: false, message: "Failed to decrypt refresh token" };
+    }
+
+    try {
+      const path = "/api/v2/auth/access_token/get";
+      const timestamp = Math.floor(Date.now() / 1000);
+      const sign = shopeeSign(creds.partnerId, path, timestamp, creds.partnerKey);
+      const url = `${SHOPEE_HOST}${path}?partner_id=${creds.partnerId}&timestamp=${timestamp}&sign=${sign}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          refresh_token: refreshTokenPlain,
+          shop_id: Number(shopId),
+          partner_id: Number(creds.partnerId),
+        }),
+      });
+
+      if (!res.ok) {
+        return { ok: false, message: `HTTP ${res.status} from Shopee refresh endpoint` };
+      }
+
+      const json = (await res.json()) as {
+        access_token?: string;
+        refresh_token?: string;
+        expire_in?: number;
+        error?: string;
+        message?: string;
+      };
+
+      if (json.error || !json.access_token) {
+        return { ok: false, message: json.message ?? json.error ?? "Unknown error from Shopee refresh" };
+      }
+
+      await upsertMarketplaceAccount({
+        marketplace: MARKETPLACE,
+        shop_id: shopId,
+        account_status: "connected",
+        access_token_encrypted: encryptToken(json.access_token),
+        refresh_token_encrypted: encryptToken(json.refresh_token ?? refreshTokenPlain),
+        token_expired_at: json.expire_in
+          ? new Date(Date.now() + json.expire_in * 1000).toISOString()
+          : null,
+      });
+
+      await recordIntegrationLog({
+        marketplace: MARKETPLACE,
+        action: "token_refresh",
+        status: "success",
+        message: "Token refreshed",
+        metadata: { shopId },
+      });
+
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : "Unexpected error during token refresh",
+      };
+    }
+  },
+
   async handleWebhook(
     payload: unknown,
     headers: Record<string, string>,
+    rawBody: string,
   ): Promise<WebhookOutcome> {
-    // TODO: validate signature using Authorization header per Shopee push spec.
-    //   const signature = headers["authorization"];
-    //   const expected = hmacSha256(`${webhookUrl}|${rawBody}`, partnerKey);
-    //   const signatureValid = signature === expected;
-    // For now we record the event with signature_valid=null and let the
-    // background processor decide.
+    const creds = getShopeeCredentials();
+    let signatureValid: boolean | null = null;
+    if (creds) {
+      const signature = headers["authorization"];
+      if (signature) {
+        const webhookUrl = this.getWebhookUrl();
+        const expected = createHmac("sha256", creds.partnerKey)
+          .update(`${webhookUrl}|${rawBody}`)
+          .digest("hex");
+        signatureValid = signature === expected;
+        if (!signatureValid) {
+          logger.warn("Shopee webhook signature mismatch");
+        }
+      }
+    }
+
     const eventType =
       isObject(payload) && typeof payload.code === "number" ? `shopee.${payload.code}` : null;
     const shopId =
@@ -266,7 +355,7 @@ export const ShopeeMarketplaceService = {
       shop_id: shopId,
       marketplace_order_id: orderId,
       payload,
-      signature_valid: null,
+      signature_valid: signatureValid,
       headers,
     });
     return { ok: true, duplicate: result.duplicate, eventId: result.row.id };

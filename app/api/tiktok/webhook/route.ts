@@ -6,10 +6,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
+  let rawBody = "";
   let payload: unknown = null;
   try {
-    const text = await request.text();
-    payload = text.length > 0 ? JSON.parse(text) : null;
+    rawBody = await request.text();
+    payload = rawBody.length > 0 ? JSON.parse(rawBody) : null;
   } catch (err) {
     logger.warn("TikTok webhook received non-JSON payload", {
       error: err instanceof Error ? err.message : String(err),
@@ -26,7 +27,7 @@ export async function POST(request: NextRequest) {
   });
 
   try {
-    const result = await TikTokMarketplaceService.handleWebhook(payload, headerMap);
+    const result = await TikTokMarketplaceService.handleWebhook(payload, headerMap, rawBody);
     return new Response(
       JSON.stringify({ ok: true, duplicate: result.ok && result.duplicate }),
       { status: 200, headers: { "content-type": "application/json" } },

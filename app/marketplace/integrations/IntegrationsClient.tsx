@@ -14,6 +14,7 @@ export interface CardData {
   title: string;
   callbackUrl: string;
   webhookUrl: string;
+  authUrl: string | null;
   connections: ConnectionInfo[];
   sampleCallbackQuery: string;
 }
@@ -93,6 +94,16 @@ function Card({ card }: { card: CardData }) {
       <UrlRow label="Webhook URL" value={card.webhookUrl} onCopy={() => copy(card.webhookUrl, "Webhook URL")} />
 
       <div className="mt-4 flex flex-wrap gap-2">
+        {card.authUrl && (
+          <a
+            href={card.authUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+          >
+            Connect
+          </a>
+        )}
         <button
           type="button"
           onClick={testCallback}
